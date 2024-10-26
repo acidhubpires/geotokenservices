@@ -1,0 +1,38 @@
+@startuml
+start
+:User opens the map;
+:Map is initialized with layers (OSM and Satellite);
+:User position is fetched via geolocation;
+:Start geolocation tracking;
+
+:User clicks "Load ERBs";
+:ERBs are loaded from JSON;
+:Display ERBs on the map using clusters;
+
+if (User clicks "Triangular") then (yes)
+  :Check if user position is available;
+  :Check if ERBs are loaded;
+
+  if (ERBs within 5km found?) then (yes)
+    :Find nearby ERBs;
+    :Calculate distances to each ERB;
+    :Display distances on the control panel;
+
+    :Perform Delaunay triangulation;
+    :Draw triangulation edges;
+    if (Toggle triangulation edges?) then (yes)
+      :Show or hide triangulation edges;
+    endif
+  else (no)
+    :Display error - "Not enough ERBs for triangulation";
+  endif
+else (no)
+  :Do nothing;
+endif
+
+:User position changes (tracking update);
+:Recalculate nearby ERBs;
+:Update triangulation and distances dynamically;
+
+stop
+@enduml

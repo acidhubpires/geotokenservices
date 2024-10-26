@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GeoTokenServices - Alternar Modo de Mapa</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/leaflet.markercluster.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.Default.css" />
+    <script src="https://unpkg.com/d3-delaunay@6"></script> <!-- Biblioteca D3 para Delaunay -->
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #1a1a1a;
+            color: #f0f0f0;
+        }
+        h3, h4, label, p {
+            color: #ffffff;
+        }
+        #map {
+            height: 80vh;
+            width: 100%;
+            margin-top: 10px;
+        }
+        #layer-controls {
+            position: absolute;
+            top: 220px;
+            left: 10px;
+            background-color: rgba(0, 0, 0, 0.7);
+            padding: 10px;
+            border-radius: 5px;
+            z-index: 1000;
+            display: none; /* Escondido por padrão */
+        }
+        #layer-controls.open {
+            display: block; /* Mostra quando estiver "aberto" */
+        }
+        #toggle-controls-button {
+            position: absolute;
+            top: 180px;
+            left: 10px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px;
+            cursor: pointer;
+            z-index: 1001;
+        }
+        #coordinates-display, #distance-display {
+            margin-top: 10px;
+            font-size: 12px;
+        }
+        #geotin-button {
+            margin: 10px 0;
+            background-color: #FF5733;
+            color: white;
+            border: none;
+            padding: 10px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <h3>GeoTokenServices by ACIDHUB</h3>
+
+    <!-- Mapa -->
+    <div id="map"></div>
+
+    <!-- Botão de Controle Flutuante -->
+    <button id="toggle-controls-button">Controles</button>
+
+    <!-- Controles de Camadas e Coordenadas -->
+    <div id="layer-controls">
+        <h4>Camadas</h4>
+        <input type="checkbox" id="toggle-geofence-layer" checked> Geofence<br>
+        <input type="checkbox" id="toggle-route-layer" checked> Rota<br>
+        <input type="checkbox" id="toggle-triangle-layer" checked> Triângulos Visíveis<br>
+        <input type="checkbox" id="toggle-geotags-layer" checked> Geotags (ERBs)<br> <!-- Controle para ERBs -->
+        <input type="checkbox" id="toggle-geofence-zoom" checked> Fixar Zoom na Geofence<br>
+        <div id="coordinates-display">
+            <p>Coordenadas:</p>
+            <p id="lat-display">Lat: -</p>
+            <p id="lon-display">Lon: -</p>
+        </div>
+        <div id="distance-display">
+            <p>Distância das torres mais próximas:</p>
+            <ul id="distance-list"></ul>
+        </div>
+        <button id="geotin-button">GeoTIN</button>
+    </div>
+
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet.markercluster/dist/leaflet.markercluster.js"></script>
+    <script>
+        let map, geofenceLayer, triangulationLayer, trackingPolyline, userMarker, markerCluster;
+        let trackPoints = [], erbsData = [], userPosition = null;
+        let triangulationActive = false, geofenceCircle = null;
+        const radius = 1000; // Raio para buscar ERBs próximas
+        const trackingIntervalTime = 5000; // Intervalo de rastreamento (5 segundos)
+
+        function initMap() {
+            const satelliteLayer = L.tileLayer('http://{s}.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', {
+                maxZoom: 20,
+                subdomains: ['mt0', 'mt1', 'mt2', 'mt3'],
+                attribution: '&copy; <a href="https://maps.google.com/">Google Maps</a>'
+            });
+            const osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 19,
+                attribution: '&copy; OpenStreetMap contributors'
+            });
+
+            map = L.map('map', {
+                center: [-23.5505, -46.6333],
+                zoom: 15,
+                layers: [satelliteLayer]
+            });
+
+            L.control.layers({ "Satélite": satelliteLayer, "OpenStreetMap": osmLayer }).addTo(map);
+
+            geofenceLayer = L.layerGroup().addTo(map);
+            triangulationLayer = L.layerGroup().addTo(map);
+            trackingPolyline = L.polyline(trackPoints, { color: 'blue' }).addTo(map);
+            markerCluster = L.markerClusterGroup(); // Cluster para ERBs
+
+            // Botões e eventos
+            document.getElementById('toggle-controls-button').addEventListener('click', toggleControls);
+            document.getElementById('toggle-geofence-layer').addEventListener('change', toggleGeofenceVisibility);
+            document.getElementById('toggle-route-layer').addEventListener('change', toggleRouteVisibility);
+            document.getElementById('toggle-triangle-layer').addEventListener('change', toggleTriangleVisibility);
+            document.getElementById('toggle-geotags-layer').addEventListener('change', toggleGeotagsVisibility);
+            document.getElementById('geotin-button').addEventListener('click', startInitialTriangulation);
+
+            loadERBs(); // Carregar ERBs automaticamente
+            startTrackingAndGeofence();
+        }
+
+        // Função para capturar a posição atual do usuário com tratamento de erros
+        function startTrackingAndGeofence() {
+            if (!navigator.geolocation) {
+                alert("Geolocalização não é suportada pelo seu navegador.");
+                return;
+            }
+
+            navigator.geolocation.watchPosition(position => {
+                const lat = position.coords.latitude;
+                const lon = position.coords.longitude;
+
+                document.getElementById('lat-display').textContent = `Lat: ${lat.toFixed(5)}`;
+                document.getElementById('lon-display').textContent = `Lon: ${lon.toFixed(5)}`;
+                userPosition = [lat, lon];
+                trackPoints.push([lat, lon]);
+                trackingPolyline.setLatLngs(trackPoints);
+
+                if (userMarker) map.removeLayer(userMarker);
+                userMarker = L.marker(userPosition, { title: "Sua Posição" }).addTo(map);
+
+                if (document.getElementById('toggle-geofence-zoom').checked) {
+                    map.setView([lat, lon], 15);
+                }
+                updateGeofence(lat, lon);
+                if (triangulationActive) {
+                    findNearbyERBs();
+                }
+            }, error => {
+                console.error("Erro ao obter localização:", error);
+                alert("Não foi possível obter a localização.");
+            }, { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 });
+        }
+
+        // Atualizar a geofence
+        function updateGeofence(lat, lon) {
+            if (geofenceCircle) geofenceLayer.removeLayer(geofenceCircle);
+            geofenceCircle = L.circle([lat, lon], {
+                radius: radius,
+                color: 'red',
+                fillOpacity: 0.2
+            }).addTo(geofenceLayer);
+        }
+
+        // Função para carregar ERBs automaticamente
+        function loadERBs() {
+            fetch('./data/geoerb24v1.json') // Caminho relativo para o JSON
+                .then(response => {
+                    if (!response.ok) throw new Error("Erro ao carregar JSON das ERBs.");
+                    return response.json();
+                })
+                .then(data => {
+                    erbsData = data;
+                    markerCluster.clearLayers();
+
+                    erbsData.forEach(erbs => {
+                        const marker = L.marker([erbs.Latitude, erbs.Longitude])
+                            .bindPopup(`<b>ERB:</b> ${erbs.NumEstacao}<br><b>Operadora:</b> ${erbs.Operadora}<br><b>Faixa:</b> ${erbs.Faixa}<br><b>Coordenadas:</b> ${erbs.Latitude}, ${erbs.Longitude}`);
+                        markerCluster.addLayer(marker);
+                    });
+
+                    map.addLayer(markerCluster);
+                })
+                .catch(error => {
+                    console.error("Erro ao carregar ERBs:", error);
+                    alert("Falha ao carregar ERBs.");
+                });
+        }
+
+        // Iniciar a triangulação e encontrar ERBs próximas
+        function startInitialTriangulation() {
+            if (!userPosition || erbsData.length === 0) {
+                alert("Posição do usuário ou ERBs não carregadas.");
+                return;
+            }
+            triangulationActive = true;
+            findNearbyERBs();
+        }
+
+        // Encontrar ERBs próximas e calcular distâncias
+        function findNearbyERBs() {
+            const nearbyERBs = erbsData.filter(erbs => {
+                const distance = map.distance(userPosition, [erbs.Latitude, erbs.Longitude]);
+                return distance <= radius;
+            });
+
+            if (nearbyERBs.length >= 3) {
+                performTriangulation(nearbyERBs);
+            } else {
+                alert("ERBs insuficientes para triangulação.");
+            }
+
+            calculateDistances(nearbyERBs);
+        }
+
+        // Triangulação Delaunay
+        function performTriangulation(nearbyERBs) {
+            triangulationLayer.clearLayers();
+            const points = nearbyERBs.map(erbs => [erbs.Latitude, erbs.Longitude]);
+            points.push(userPosition); // Inclui posição do usuário
+
+            const delaunay = d3.Delaunay.from(points, d => d[1], d => d[0]);
+            const triangles = delaunay.triangles;
+
+            for (let i = 0; i < triangles.length; i += 3) {
+                const p1 = points[triangles[i]];
+                const p2 = points[triangles[i + 1]];
+                const p3 = points[triangles[i + 2]];
+
+                const triangle = L.polygon([p1, p2, p3], {
+                    color: 'green',
+                    fillColor: 'green',
+                    fillOpacity: 0.1
+                }).addTo(triangulationLayer);
+            }
+
+            map.addLayer(triangulationLayer);
+        }
+
+        // Função para calcular distâncias e exibir
+        function calculateDistances(nearbyERBs) {
+            const distanceList = document.getElementById('distance-list');
+            distanceList.innerHTML = ''; // Limpa lista de distâncias
+
+            nearbyERBs.forEach(erbs => {
+                const distance = map.distance(userPosition, [erbs.Latitude, erbs.Longitude]).toFixed(2);
+                const li = document.createElement('li');
+                li.textContent = `ERB ${erbs.NumEstacao}: ${distance} metros`;
+                distanceList.appendChild(li);
+            });
+        }
+
+        // Alternar visibilidade da geofence
+        function toggleGeofenceVisibility() {
+            if (document.getElementById('toggle-geofence-layer').checked) {
+                map.addLayer(geofenceLayer);
+            } else {
+                map.removeLayer(geofenceLayer);
+            }
+        }
+
+        // Alternar visibilidade da rota (caminhamento)
+        function toggleRouteVisibility() {
+            if (document.getElementById('toggle-route-layer').checked) {
+                map.addLayer(trackingPolyline);
+            } else {
+                map.removeLayer(trackingPolyline);
+            }
+        }
+
+        // Alternar visibilidade da camada de triângulos
+        function toggleTriangleVisibility() {
+            if (map.hasLayer(triangulationLayer)) {
+                map.removeLayer(triangulationLayer);
+            } else {
+                map.addLayer(triangulationLayer);
+            }
+        }
+
+        // Alternar visibilidade das Geotags (ERBs)
+        function toggleGeotagsVisibility() {
+            if (map.hasLayer(markerCluster)) {
+                map.removeLayer(markerCluster);
+            } else {
+                map.addLayer(markerCluster);
+            }
+        }
+
+        // Alternar visibilidade dos controles
+        function toggleControls() {
+            const controls = document.getElementById('layer-controls');
+            controls.classList.toggle('open');
+        }
+
+        initMap();
+    </script>
+</body>
+</html>

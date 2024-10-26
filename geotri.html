@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GeoJSON Map Viewer</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <style>
+        #map {
+            height: 500px;
+        }
+
+        .leaflet-popup-content-wrapper {
+            width: auto !important;
+        }
+    </style>
+</head>
+<body>
+    <h2>GeoJSON Map Viewer</h2>
+    <div>
+        <input type="file" accept=".geojson" id="file-input">
+        <button onclick="loadGeoJSON()">Carregar GeoJSON</button>
+    </div>
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script>
+        let map;
+        let geoJSONLayer;
+        let delaunayLayer;
+        let userPosition = null;
+        let previousPoints = [];
+
+        function initMap() {
+            map = L.map('map').setView([-15.793889, -47.882778], 10); // Centraliza em Brasília
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 19,
+                attribution: 'Map data &copy; <a href="https://www.openstreetmap.org/">OpenStreetMap</a> contributors'
+            }).addTo(map);
+
+            // Captura a posição do usuário
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition((position) => {
+                    userPosition = [position.coords.latitude, position.coords.longitude];
+                    L.marker(userPosition).addTo(map).bindPopup("Posição do Usuário").openPopup();
+                    map.setView(userPosition, 13);
+                });
+            }
+        }
+
+        function loadGeoJSON() {
+            const fileInput = document.getElementById('file-input');
+            const file = fileInput.files[0];
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                const data = JSON.parse(event.target.result);
+                addGeoJSONLayer(data);
+                findNearbyPoints(data); // Encontra pontos próximos ao usuário
+            };
+            reader.readAsText(file);
+        }
+
+        function addGeoJSONLayer(data) {
+            if (geoJSONLayer) {
+                map.removeLayer(geoJSONLayer);
+            }
+            geoJSONLayer = L.geoJSON(data, {
+                pointToLayer: function(feature, latlng) {
+                    return L.circleMarker(latlng, { color: 'red' });
+                }
+            }).addTo(map);
+        }
+
+        // Função para encontrar os pontos próximos à posição do usuário
+        function findNearbyPoints(data) {
+            if (!userPosition) {
+                alert("A posição do usuário não foi encontrada.");
+                return;
+            }
+
+            const nearbyPoints = [];
+            const userLatLng = L.latLng(userPosition[0], userPosition[1]);
+
+            data.features.forEach((feature) => {
+                if (feature.geometry.type === 'Point') {
+                    const pointCoords = feature.geometry.coordinates;
+                    const pointLatLng = L.latLng(pointCoords[1], pointCoords[0]);
+                    const distance = userLatLng.distanceTo(pointLatLng);
+
+                    // Considera apenas as torres a uma distância de até 5km
+                    if (distance <= 5000) {
+                        nearbyPoints.push(pointCoords);
+                        L.marker(pointLatLng).addTo(map).bindPopup(`Distância: ${distance.toFixed(2)} metros`);
+                    }
+                }
+            });
+
+            if (nearbyPoints.length > 2) {
+                triangulateNearbyPoints(nearbyPoints);
+            } else {
+                alert("Não há pontos suficientes para triangulação.");
+            }
+        }
+
+        // Função para realizar a triangulação Delaunay somente entre os pontos próximos
+        function triangulateNearbyPoints(nearbyPoints) {
+            if (delaunayLayer) {
+                map.removeLayer(delaunayLayer);
+            }
+
+            const delaunay = d3.Delaunay.from(nearbyPoints, d => d[0], d => d[1]);
+            const triangles = delaunay.triangles;
+
+            delaunayLayer = L.layerGroup();
+
+            for (let i = 0; i < triangles.length; i += 3) {
+                const p1 = nearbyPoints[triangles[i]];
+                const p2 = nearbyPoints[triangles[i + 1]];
+                const p3 = nearbyPoints[triangles[i + 2]];
+
+                const triangle = L.polygon([[p1[1], p1[0]], [p2[1], p2[0]], [p3[1], p3[0]]], {
+                    color: 'blue',
+                    fillColor: 'blue',
+                    fillOpacity: 0.2
+                }).addTo(delaunayLayer);
+                triangle.bindPopup(`Triângulo ${i / 3 + 1}`);
+            }
+
+            map.addLayer(delaunayLayer);
+
+            // Armazena os pontos triangulados para uso em próximas triangulações
+            previousPoints = nearbyPoints;
+        }
+
+        // Atualiza a posição do usuário e refaz a triangulação
+        function updateUserPosition(position) {
+            userPosition = [position.coords.latitude, position.coords.longitude];
+            L.marker(userPosition).addTo(map).bindPopup("Nova Posição do Usuário").openPopup();
+            findNearbyPoints(geoJSONLayer.toGeoJSON());
+        }
+
+        window.onload = function() {
+            initMap();
+
+            // Configurar o rastreamento contínuo da posição do usuário
+            if (navigator.geolocation) {
+                navigator.geolocation.watchPosition(updateUserPosition);
+            }
+        };
+    </script>
+</body>
+</html>

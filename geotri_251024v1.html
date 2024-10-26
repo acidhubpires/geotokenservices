@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AroundSet - Alternar Modo de Mapa</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/leaflet.markercluster.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.Default.css" />
+    <script src="https://unpkg.com/d3-delaunay@6"></script> <!-- Biblioteca D3 para Delaunay -->
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #1a1a1a;
+            color: #f0f0f0;
+        }
+        h3, h4, label, p {
+            color: #ffffff;
+        }
+        #map {
+            height: 80vh;
+            width: 100%;
+            margin-top: 10px;
+        }
+        #layer-controls {
+            position: absolute;
+            top: 220px;
+            left: 10px;
+            background-color: rgba(0, 0, 0, 0.7);
+            padding: 10px;
+            border-radius: 5px;
+            z-index: 1000;
+        }
+        #coordinates-display, #distance-display {
+            margin-top: 10px;
+            font-size: 12px;
+        }
+        #load-erbs-button, #triangulate-button, #toggle-edges-button {
+            margin: 10px 0;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px;
+            cursor: pointer;
+        }
+        #toggle-edges-button {
+            background-color: #FF5733;
+        }
+    </style>
+</head>
+<body>
+    <h3>AroundSet by ACIDHUB</h3>
+
+    <!-- Mapa -->
+    <div id="map"></div>
+
+    <!-- Controles de Camadas e Coordenadas -->
+    <div id="layer-controls">
+        <h4>Camadas</h4>
+        <input type="checkbox" id="toggle-geofence-layer" checked> Geofence<br>
+        <input type="checkbox" id="toggle-tracking-layer" checked> Caminhamento<br>
+        <input type="checkbox" id="toggle-poi-layer" checked> PoIs
+        <div id="coordinates-display">
+            <p>Coordenadas:</p>
+            <p id="lat-display">Lat: -</p>
+            <p id="lon-display">Lon: -</p>
+        </div>
+        <div id="distance-display">
+            <p>Distância das torres mais próximas:</p>
+            <ul id="distance-list"></ul>
+        </div>
+        <input type="file" id="json-file" />
+        <button id="load-erbs-button">Carregar ERBs</button>
+        <button id="triangulate-button">Triangular</button>
+        <button id="toggle-edges-button">Toggle Arestas</button>
+    </div>
+
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet.markercluster/dist/leaflet.markercluster.js"></script>
+    <script>
+        let map, geofenceLayer, poiLayer, geofenceCircle, triangulationLayer;
+        let trackingPolyline, trackingInterval, trackPoints = [];
+        let erbsData = [], userPosition = null, delaunayEdges = [];
+        let triangulationActive = false;
+        const radius = 1000; // Raio para buscar ERBs próximas (5 km)
+        const trackingIntervalTime = 5000; // Intervalo de rastreamento (5 segundos)
+
+        // Inicializa o mapa com camadas de satélite e OSM (OpenStreetMap)
+        function initMap() {
+            const satelliteLayer = L.tileLayer('http://{s}.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', {
+                maxZoom: 20,
+                subdomains: ['mt0', 'mt1', 'mt2', 'mt3'],
+                attribution: '&copy; <a href="https://maps.google.com/">Google Maps</a>'
+            });
+
+            const osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 19,
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+            });
+
+            map = L.map('map', {
+                center: [-23.5505, -46.6333], // Posição inicial em São Paulo
+                zoom: 15,
+                layers: [satelliteLayer]
+            });
+
+            L.control.layers({ "Satélite": satelliteLayer, "OpenStreetMap": osmLayer }).addTo(map);
+
+            geofenceLayer = L.layerGroup().addTo(map);
+            triangulationLayer = L.layerGroup().addTo(map); // Camada para as arestas da triangulação
+            trackingPolyline = L.polyline(trackPoints, { color: 'blue' }).addTo(map);
+
+            document.getElementById('load-erbs-button').addEventListener('click', loadERBs);
+            document.getElementById('triangulate-button').addEventListener('click', startInitialTriangulation);
+            document.getElementById('toggle-edges-button').addEventListener('click', toggleEdgesVisibility);
+
+            // Iniciar rastreamento e geofence
+            startTrackingAndGeofence();
+        }
+
+        // Função para capturar a posição atual do usuário e iniciar o rastreamento e geofence
+        function startTrackingAndGeofence() {
+            trackingInterval = setInterval(() => {
+                navigator.geolocation.getCurrentPosition(position => {
+                    const lat = position.coords.latitude;
+                    const lon = position.coords.longitude;
+
+                    document.getElementById('lat-display').textContent = `Lat: ${lat.toFixed(5)}`;
+                    document.getElementById('lon-display').textContent = `Lon: ${lon.toFixed(5)}`;
+
+                    userPosition = [lat, lon];
+
+                    trackPoints.push([lat, lon]);
+                    trackingPolyline.setLatLngs(trackPoints);
+
+                    map.setView([lat, lon], 15);
+                    updateGeofence(lat, lon);
+
+                    if (triangulationActive) {
+                        findNearbyERBs();
+                    }
+                });
+            }, trackingIntervalTime);
+        }
+
+        // Função para atualizar a geofence conforme o usuário se move
+        function updateGeofence(lat, lon) {
+            if (geofenceCircle) {
+                geofenceLayer.removeLayer(geofenceCircle);
+            }
+            geofenceCircle = L.circle([lat, lon], {
+                radius: radius,
+                color: 'red',
+                fillOpacity: 0.2
+            }).addTo(geofenceLayer);
+        }
+
+        // Função para carregar os pontos de ERBs e exibi-los no mapa com clusters a partir de um arquivo JSON
+        function loadERBs() {
+            const fileInput = document.getElementById('json-file');
+            const file = fileInput.files[0];
+
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = function(event) {
+                    erbsData = JSON.parse(event.target.result);
+
+                    const markerCluster = L.markerClusterGroup();
+
+                    erbsData.forEach(erbs => {
+                        const marker = L.marker([erbs.Latitude, erbs.Longitude])
+                            .bindPopup(`<b>ERB:</b> ${erbs.NumEstacao}<br><b>Operadora:</b> ${erbs.Operadora}<br><b>Faixa:</b> ${erbs.Faixa}<br><b>Coordenadas:</b> ${erbs.Latitude}, ${erbs.Longitude}`);
+                        markerCluster.addLayer(marker);
+                    });
+
+                    map.addLayer(markerCluster);
+                };
+
+                reader.readAsText(file);
+            } else {
+                alert('Por favor, selecione um arquivo JSON primeiro.');
+            }
+        }
+
+        // Função para ativar a triangulação inicial entre o usuário e as ERBs
+        function startInitialTriangulation() {
+            if (!userPosition || erbsData.length === 0) {
+                alert("Posição do usuário ou ERBs não carregadas.");
+                return;
+            }
+
+            triangulationActive = true;
+            findNearbyERBs(); // Encontra ERBs próximas e faz a triangulação inicial
+        }
+
+        // Função para encontrar as ERBs próximas e realizar a triangulação
+        function findNearbyERBs() {
+            if (!userPosition) {
+                alert("Posição do usuário não disponível.");
+                return;
+            }
+
+            // Filtrar as ERBs que estão dentro do raio especificado (5 km)
+            const nearbyERBs = erbsData.filter(erbs => {
+                const erbsLatLng = L.latLng(erbs.Latitude, erbs.Longitude);
+                const distance = map.distance(userPosition, erbsLatLng);
+                return distance <= radius; // Considera ERBs dentro do raio
+            });
+
+            if (nearbyERBs.length >= 3) {
+                performTriangulation(nearbyERBs);
+            } else {
+                alert("ERBs insuficientes para triangulação.");
+            }
+
+            // Calcular e exibir as distâncias
+            calculateDistances(nearbyERBs);
+        }
+
+        // Função para realizar a triangulação Delaunay entre as ERBs próximas
+        function performTriangulation(nearbyERBs) {
+            // Limpar as arestas existentes
+            triangulationLayer.clearLayers();
+
+            // Preparar os pontos para a triangulação
+            const points = nearbyERBs.map(erbs => [erbs.Latitude, erbs.Longitude]);
+            points.push(userPosition); // Incluir a posição do usuário
+
+            const delaunay = d3.Delaunay.from(points, d => d[1], d => d[0]);
+            const triangles = delaunay.triangles;
+
+            // Desenhar as arestas da triangulação no mapa
+            for (let i = 0; i < triangles.length; i += 3) {
+                const p1 = points[triangles[i]];
+                const p2 = points[triangles[i + 1]];
+                const p3 = points[triangles[i + 2]];
+
+                const triangle = L.polygon([[p1[0], p1[1]], [p2[0], p2[1]], [p3[0], p3[1]]], {
+                    color: 'green',
+                    fillColor: 'green',
+                    fillOpacity: 0.1
+                }).addTo(triangulationLayer);
+            }
+
+            map.addLayer(triangulationLayer);
+        }
+
+        // Função para calcular e exibir as distâncias das ERBs próximas
+        function calculateDistances(nearbyERBs) {
+            const distanceList = document.getElementById('distance-list');
+            distanceList.innerHTML = ''; // Limpar a lista de distâncias
+
+            nearbyERBs.forEach(erbs => {
+                const erbsLatLng = L.latLng(erbs.Latitude, erbs.Longitude);
+                const distance = map.distance(userPosition, erbsLatLng).toFixed(2);
+
+                const li = document.createElement('li');
+                li.textContent = `ERB ${erbs.NumEstacao}: ${distance} metros`;
+                distanceList.appendChild(li);
+            });
+        }
+
+        // Função para alternar a visibilidade das arestas da triangulação
+        function toggleEdgesVisibility() {
+            if (map.hasLayer(triangulationLayer)) {
+                map.removeLayer(triangulationLayer);
+            } else {
+                map.addLayer(triangulationLayer);
+            }
+        }
+
+        initMap();
+    </script>
+</body>
+</html>
